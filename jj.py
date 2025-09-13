@@ -3891,8 +3891,8 @@ import asyncio, os, json, datetime, re
 # مكان حفظ بيانات الجلسات المنصبة
 SESSIONS_FILE = "sessions.json"
 sessions = {}
+active_clients = {}  # نخزن الكلاينتات المفعلة هنا
 
-# دالة لتحميل الجلسات السابقة عند بدء التشغيل
 def load_sessions():
     global sessions
     if os.path.exists(SESSIONS_FILE):
@@ -3900,42 +3900,29 @@ def load_sessions():
             try:
                 sessions = json.load(f)
             except json.JSONDecodeError:
-                print("⚠️ تحذير: ملف sessions.json فارغ أو تالف.")
                 sessions = {}
-    else:
-        sessions = {}
 
-# دالة لحفظ بيانات الجلسات في ملف JSON
 async def save_sessions():
     with open(SESSIONS_FILE, "w") as f:
         json.dump(sessions, f, indent=4)
 
-# --- أمر التنصيب النهائي والمصحح ---
-
 @client.on(events.NewMessage(from_users='me', pattern=r"^\.تنصيب(?: (.*))?$"))
 async def install_session(event):
-    """
-    هذا المعالج يعمل فقط عند الرد على ملف، ويضيف دائمًا جلسة جديدة.
-    """
     replied_message = await event.get_reply_message()
     
-    # --- هذا هو الشرط الأهم الذي تم تصحيحه ---
     if not (replied_message and replied_message.file):
-        await event.edit("**⚠️ خطأ: يجب الرد على رسالة تحتوي على ملف الجلسة لتنصيبه.**")
+        await event.edit("**⚠️ خطأ: يجب الرد على رسالة تحتوي على ملف الجلسة.**")
         return
 
-    # التحقق من امتداد الملف
     file_name = replied_message.file.name
     if not (file_name.endswith(".session") or file_name.endswith(".db")):
-        await event.edit("**⛔ خطأ: يرجى الرد على ملف جلسة بامتداد .session أو .db فقط.**")
+        await event.edit("**⛔ خطأ: يجب الرد على ملف بامتداد .session أو .db فقط.**")
         return
 
     await event.edit("⏳ جارٍ تحميل وتنصيب الجلسة...")
     
-    # تحميل الملف إلى المجلد الرئيسي ليتوافق مع GitHub Actions
     download_path = await replied_message.download_media(file=".")
     
-    # منطق إضافة جلسات متكررة باسم فريد
     original_name = os.path.basename(download_path)
     session_name_to_save = original_name
     counter = 1
@@ -3949,7 +3936,6 @@ async def install_session(event):
         os.rename(download_path, new_path)
         download_path = new_path
 
-    # إضافة الجلسة الجديدة إلى القاموس
     me = await client.get_me()
     sessions[session_name_to_save] = {
         "file": download_path,
@@ -3958,7 +3944,6 @@ async def install_session(event):
         "expiry": None
     }
     
-    # تحديد مدة التنصيب
     arg = event.pattern_match.group(1)
     
     if arg is None:
@@ -3974,17 +3959,26 @@ async def install_session(event):
         sessions[session_name_to_save]["expiry"] = expiry_time.strftime("%Y-%m-%d %H:%M:%S")
         response_message = f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` لمدة `{days}` أيام.**"
     else:
-        # تنظيف في حالة الخطأ
         del sessions[session_name_to_save]
         os.remove(download_path)
         await save_sessions()
         await event.edit("**⛔ خطأ في صيغة الأمر. استخدم:\n`.تنصيب`\n`.تنصيب تجريبي`\n`.تنصيب 5`")
         return
 
+    # ✅ تشغيل الجلسة مباشرة من ملف الـ session
+    try:
+        session = SQLiteSession(download_path)
+        new_client = TelegramClient(session, api_id=1, api_hash="1")
+        await new_client.start()
+        active_clients[session_name_to_save] = new_client
+        sessions[session_name_to_save]["active"] = True
+        response_message += "\n**🔌 الجلسة تم تشغيلها وتسجيل دخولها بنجاح.**"
+    except Exception as e:
+        sessions[session_name_to_save]["active"] = False
+        response_message += f"\n**⚠️ فشل تشغيل الجلسة:** `{str(e)}`"
+
     await save_sessions()
     await event.edit(response_message)
-
-# --- بقية الأوامر (جلساتي، انهاء) ---
 
 @client.on(events.NewMessage(from_users='me', pattern=r"^\.جلساتي$"))
 async def list_sessions(event):
@@ -3993,7 +3987,8 @@ async def list_sessions(event):
         return
     msg = "**📂 قائمة الجلسات النشطة:**\n\n"
     for i, (sname, info) in enumerate(sessions.items(), 1):
-        msg += f"**{i}.** `{sname}`\n   - **الانتهاء:** {info['expiry']}\n"
+        status = "✅ شغالة" if info.get("active") else "❌ متوقفة"
+        msg += f"**{i}.** `{sname}`\n   - **الانتهاء:** {info['expiry']}\n   - **الحالة:** {status}\n"
     await event.edit(msg)
 
 @client.on(events.NewMessage(from_users='me', pattern=r"^\.انهاء (\d+)$"))
@@ -4005,6 +4000,9 @@ async def end_session(event):
             session_name = session_list[idx]
             if os.path.exists(sessions[session_name]["file"]):
                 os.remove(sessions[session_name]["file"])
+            if session_name in active_clients:
+                await active_clients[session_name].disconnect()
+                del active_clients[session_name]
             del sessions[session_name]
             await save_sessions()
             await event.edit(f"**✅ تم إنهاء الجلسة بنجاح:** `{session_name}`")
@@ -4012,7 +4010,6 @@ async def end_session(event):
             await event.edit("**⛔ رقم الجلسة غير صحيح.**")
     except Exception as e:
         await event.edit(f"**⛔ حدث خطأ:**\n`{str(e)}`")
-
 
 
 
