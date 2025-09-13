@@ -3892,59 +3892,64 @@ import asyncio, os, json, datetime, re
 SESSIONS_FILE = "sessions.json"
 sessions = {}
 
-# تحميل الجلسات السابقة عند بدء التشغيل
-if os.path.exists(SESSIONS_FILE):
-    with open(SESSIONS_FILE, "r") as f:
-        try:
-            sessions = json.load(f)
-        except json.JSONDecodeError:
-            print("⚠️ تحذير: ملف sessions.json فارغ أو تالف. سيتم إنشاء ملف جديد.")
-            sessions = {}
+# دالة لتحميل الجلسات السابقة عند بدء التشغيل
+def load_sessions():
+    global sessions
+    if os.path.exists(SESSIONS_FILE):
+        with open(SESSIONS_FILE, "r") as f:
+            try:
+                sessions = json.load(f)
+            except json.JSONDecodeError:
+                print("⚠️ تحذير: ملف sessions.json فارغ أو تالف.")
+                sessions = {}
+    else:
+        sessions = {}
 
 # دالة لحفظ بيانات الجلسات في ملف JSON
 async def save_sessions():
     with open(SESSIONS_FILE, "w") as f:
         json.dump(sessions, f, indent=4)
 
-# --- أمر التنصيب المعدل (لإضافة جلسات جديدة دائمًا) ---
+# --- أمر التنصيب النهائي والمصحح ---
 
 @client.on(events.NewMessage(from_users='me', pattern=r"^\.تنصيب(?: (.*))?$"))
 async def install_session(event):
     """
-    التعامل مع أوامر التنصيب. يضيف دائمًا جلسة جديدة ولا يقوم بالكتابة فوق القديمة.
+    هذا المعالج يعمل فقط عند الرد على ملف، ويضيف دائمًا جلسة جديدة.
     """
     replied_message = await event.get_reply_message()
     
+    # --- هذا هو الشرط الأهم الذي تم تصحيحه ---
     if not (replied_message and replied_message.file):
-        await event.edit("**⚠️ خطأ: يجب الرد على ملف الجلسة لتنصيبه.**")
+        await event.edit("**⚠️ خطأ: يجب الرد على رسالة تحتوي على ملف الجلسة لتنصيبه.**")
         return
 
+    # التحقق من امتداد الملف
     file_name = replied_message.file.name
     if not (file_name.endswith(".session") or file_name.endswith(".db")):
         await event.edit("**⛔ خطأ: يرجى الرد على ملف جلسة بامتداد .session أو .db فقط.**")
         return
 
-    # تحميل الملف إلى المجلد الحالي
-    await event.edit("⏳ جارٍ تحميل الملف...")
-    download_path = await replied_message.download_media(file=".") # نحفظه في المجلد الرئيسي
+    await event.edit("⏳ جارٍ تحميل وتنصيب الجلسة...")
     
-    # --- هذا هو المنطق الجديد لإضافة جلسات متكررة ---
+    # تحميل الملف إلى المجلد الرئيسي ليتوافق مع GitHub Actions
+    download_path = await replied_message.download_media(file=".")
+    
+    # منطق إضافة جلسات متكررة باسم فريد
     original_name = os.path.basename(download_path)
     session_name_to_save = original_name
     counter = 1
-    # إذا كان الاسم موجودًا بالفعل، أضف رقمًا له
     while session_name_to_save in sessions:
         name, ext = os.path.splitext(original_name)
         session_name_to_save = f"{name}({counter}){ext}"
         counter += 1
     
-    # إذا تم إنشاء اسم جديد، قم بإعادة تسمية الملف الفعلي
     if session_name_to_save != original_name:
         new_path = os.path.join(os.path.dirname(download_path), session_name_to_save)
         os.rename(download_path, new_path)
         download_path = new_path
-    # ----------------------------------------------------
 
+    # إضافة الجلسة الجديدة إلى القاموس
     me = await client.get_me()
     sessions[session_name_to_save] = {
         "file": download_path,
@@ -3953,29 +3958,33 @@ async def install_session(event):
         "expiry": None
     }
     
+    # تحديد مدة التنصيب
     arg = event.pattern_match.group(1)
     
     if arg is None:
         sessions[session_name_to_save]["expiry"] = "دائم"
-        await event.edit(f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` (تنصيب دائم).**")
+        response_message = f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` (تنصيب دائم).**"
     elif arg == "تجريبي":
         expiry_time = datetime.datetime.now() + datetime.timedelta(hours=4)
         sessions[session_name_to_save]["expiry"] = expiry_time.strftime("%Y-%m-%d %H:%M:%S")
-        await event.edit(f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` كتجربة لمدة 4 ساعات.**")
+        response_message = f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` كتجربة لمدة 4 ساعات.**"
     elif arg.isdigit():
         days = int(arg)
         expiry_time = datetime.datetime.now() + datetime.timedelta(days=days)
         sessions[session_name_to_save]["expiry"] = expiry_time.strftime("%Y-%m-%d %H:%M:%S")
-        await event.edit(f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` لمدة `{days}` أيام.**")
+        response_message = f"**✅ تم إضافة وتنصيب الجلسة `{session_name_to_save}` لمدة `{days}` أيام.**"
     else:
+        # تنظيف في حالة الخطأ
         del sessions[session_name_to_save]
         os.remove(download_path)
+        await save_sessions()
         await event.edit("**⛔ خطأ في صيغة الأمر. استخدم:\n`.تنصيب`\n`.تنصيب تجريبي`\n`.تنصيب 5`")
         return
 
     await save_sessions()
+    await event.edit(response_message)
 
-
+# --- بقية الأوامر (جلساتي، انهاء) ---
 
 @client.on(events.NewMessage(from_users='me', pattern=r"^\.جلساتي$"))
 async def list_sessions(event):
@@ -4003,8 +4012,6 @@ async def end_session(event):
             await event.edit("**⛔ رقم الجلسة غير صحيح.**")
     except Exception as e:
         await event.edit(f"**⛔ حدث خطأ:**\n`{str(e)}`")
-
-
 
 
 
